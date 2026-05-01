@@ -437,23 +437,69 @@ export default function App() {
   const [results, setResults]      = useState(MOCK_ITEMS)
   const [queries, setQueries]      = useState({})
   const [drawerOpen, setDrawer]    = useState(false)
-  const [archiveTick, setTick]     = useState(0) // force re-render after archive change
+  const [archiveTick, setTick]     = useState(0)
+  const [searching, setSearching]  = useState(false)
 
   const handlePlanChange = newPlan => {
     setPlanState(newPlan)
     if (newPlan.id === 'free' && sortMode === 'popularity') setSortMode('recent')
   }
 
-  const handleSearch = ({ charName, workName, tags }) => {
+  const handleSearch = async ({ charName, workName, tags }) => {
     const allInput = [charName, workName].join(' ').trim()
     setQueries(translateToQueries(allInput, tags))
-
-    const terms = [charName, workName, ...tags].map(s=>s.toLowerCase().replace(/\s+/g,'_')).filter(Boolean)
-    const filtered = terms.length === 0 ? MOCK_ITEMS
-      : MOCK_ITEMS.filter(item => terms.some(q => item.tags.some(t=>t.includes(q)) || item.title.toLowerCase().includes(q.replace(/_/g,' '))))
-
-    setResults(filtered.length ? filtered : MOCK_ITEMS)
+    setSearching(true)
+    setResults([])
     setActiveCat('all')
+
+    // ── 입력값 → Danbooru 태그로 변환 ──
+    const allTerms = [charName, workName, ...tags].filter(Boolean)
+    if (allTerms.length === 0) { setResults(MOCK_ITEMS); setSearching(false); return }
+
+    // 한국어 → danbooru 태그 변환 (TAG_DICTIONARY 활용)
+    const danbooruTags = allTerms.map(t => {
+      const entry = TAG_DICTIONARY[t] ?? TAG_DICTIONARY[t.toLowerCase()]
+      return entry ? entry.danbooru : t.toLowerCase().replace(/\s+/g, '_')
+    })
+
+    // 최대 2개 태그만 조합 (Danbooru 제한)
+    const queryTag = danbooruTags.slice(0, 2).join('+')
+
+    try {
+      // Danbooru 공개 API — API 키 불필요, rating:g = 전체이용가
+      const url = `https://danbooru.donmai.us/posts.json?tags=${encodeURIComponent(queryTag + '+rating:g')}&limit=24&random=true`
+      const res  = await fetch(url)
+      const data = await res.json()
+
+      if (!Array.isArray(data) || data.length === 0) {
+        setResults(MOCK_ITEMS); setSearching(false); return
+      }
+
+      // Danbooru 응답 → 내부 포맷 변환
+      const converted = data
+        .filter(p => p.preview_file_url || p.large_file_url)
+        .map(p => ({
+          id:         p.id,
+          title:      (p.tag_string_character || '').replace(/_/g,' ').split(' ').slice(0,4).join(' ') || 'Untitled',
+          artist:     (p.tag_string_artist   || 'unknown').replace(/_/g,' ').split(' ')[0],
+          src:        p.preview_file_url ?? p.large_file_url,
+          likes:      p.score       ?? 0,
+          views:      p.view_count  ?? 0,
+          date:       p.created_at  ?? new Date().toISOString(),
+          tags:       (p.tag_string ?? '').split(' ').slice(0, 8),
+          site:       'danbooru',
+          category:   p.score > 50 ? 'high_quality' : p.score > 10 ? 'recent' : 'sketch',
+          badge:      p.score > 50 ? '★ HQ' : p.score > 10 ? '⚡ Recent' : '✏ Sketch',
+          badgeColor: p.score > 50 ? '#F59E0B' : p.score > 10 ? '#10B981' : '#6366F1',
+        }))
+
+      setResults(converted.length ? converted : MOCK_ITEMS)
+    } catch (e) {
+      console.error('Danbooru API error:', e)
+      setResults(MOCK_ITEMS)
+    } finally {
+      setSearching(false)
+    }
   }
 
   const displayItems = (() => {
@@ -530,13 +576,25 @@ export default function App() {
       </div>
 
       {/* ── Gallery ── */}
-      <div className="masonry">
-        {displayItems.map((item, i) => (
-          <div key={item.id} className="masonry-item" style={{ animationDelay:`${i*35}ms` }}>
-            <ArtCard item={item} onArchiveChange={()=>setTick(t=>t+1)} />
-          </div>
-        ))}
-      </div>
+      {searching ? (
+        <div style={{ textAlign:'center', padding:'48px 0' }}>
+          <div style={{ display:'inline-block', width:36, height:36, border:'3px solid #FFD6E8', borderTopColor:'#FF6B9D', borderRadius:'50%', animation:'spin 0.7s linear infinite' }} />
+          <p style={{ marginTop:12, fontFamily:"'Nunito',sans-serif", fontWeight:700, color:'#aaa', fontSize:13 }}>Danbooru에서 검색 중...</p>
+        </div>
+      ) : displayItems.length === 0 ? (
+        <div style={{ textAlign:'center', padding:'48px 0' }}>
+          <div style={{ fontSize:36, marginBottom:8 }}>😢</div>
+          <p style={{ fontFamily:"'Nunito',sans-serif", fontWeight:700, color:'#aaa', fontSize:13 }}>검색 결과가 없어요. 다른 키워드를 시도해 보세요.</p>
+        </div>
+      ) : (
+        <div className="masonry">
+          {displayItems.map((item, i) => (
+            <div key={item.id} className="masonry-item" style={{ animationDelay:`${i*35}ms` }}>
+              <ArtCard item={item} onArchiveChange={()=>setTick(t=>t+1)} />
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ── Footer ── */}
       <footer style={{ marginTop:28, paddingTop:14, borderTop:'2px dashed #FFD6E8', textAlign:'center' }}>
